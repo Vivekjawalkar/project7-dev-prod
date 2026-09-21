@@ -1,0 +1,29 @@
+{
+  "family": "project7-prod-task",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::434504868934:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "project7-prod-app",
+      "image": "434504868934.dkr.ecr.us-east-1.amazonaws.com/project7-prod-java-app:1.0",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/project7-dev-prod",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "prod"
+        }
+      }
+    }
+  ]
+}
