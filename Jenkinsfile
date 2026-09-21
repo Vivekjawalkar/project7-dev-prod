@@ -1,3 +1,5 @@
+cd ~/project7-dev-prod
+cat > Jenkinsfile <<'EOF'
 pipeline {
     agent any
 
@@ -30,8 +32,13 @@ pipeline {
             steps {
                 dir('app') {
                     sh '''
+                        set -e
+
                         echo "Building Java application..."
+
                         mvn clean package -DskipTests
+
+                        echo "Build completed successfully."
                     '''
                 }
             }
@@ -41,8 +48,13 @@ pipeline {
             steps {
                 dir('app') {
                     sh '''
+                        set -e
+
                         echo "Running application tests..."
+
                         mvn test
+
+                        echo "Application tests passed."
                     '''
                 }
             }
@@ -52,11 +64,15 @@ pipeline {
             steps {
                 dir('app') {
                     sh '''
+                        set -e
+
                         echo "Building Docker image..."
 
                         docker build \
                             -t ${DEV_ECR}:${IMAGE_TAG} \
                             .
+
+                        echo "Docker image built successfully."
 
                         docker images | grep project7-dev-java-app
                     '''
@@ -67,6 +83,8 @@ pipeline {
         stage('Push Image to DEV ECR') {
             steps {
                 sh '''
+                    set -e
+
                     echo "Logging in to DEV ECR..."
 
                     aws ecr get-login-password \
@@ -80,6 +98,11 @@ pipeline {
                     docker push ${DEV_ECR}:${IMAGE_TAG}
 
                     echo "DEV image pushed successfully."
+
+                    aws ecr describe-images \
+                        --repository-name project7-dev-java-app \
+                        --image-ids imageTag=${IMAGE_TAG} \
+                        --region ${AWS_REGION}
                 '''
             }
         }
@@ -87,9 +110,11 @@ pipeline {
         stage('Deploy to DEV') {
             steps {
                 sh '''
+                    set -e
+
                     echo "Preparing DEV ECS task definition..."
 
-                    cat > dev-task-definition-pipeline.json <<EOF
+                    cat > dev-task-definition-pipeline.json <<EOF_TASK
 {
   "family": "project7-dev-task",
   "networkMode": "awsvpc",
@@ -121,7 +146,7 @@ pipeline {
     }
   ]
 }
-EOF
+EOF_TASK
 
                     echo "Registering DEV task definition..."
 
@@ -129,7 +154,7 @@ EOF
                         --cli-input-json file://dev-task-definition-pipeline.json \
                         --region ${AWS_REGION}
 
-                    echo "Updating DEV service..."
+                    echo "Updating DEV ECS service..."
 
                     aws ecs update-service \
                         --cluster ${DEV_CLUSTER} \
@@ -145,7 +170,7 @@ EOF
                         --services ${DEV_SERVICE} \
                         --region ${AWS_REGION}
 
-                    echo "DEV deployment completed."
+                    echo "DEV deployment completed successfully."
                 '''
             }
         }
@@ -153,12 +178,30 @@ EOF
         stage('Test DEV') {
             steps {
                 sh '''
+                    set -e
+
                     echo "Finding running DEV task..."
 
-                    ENI_ID=$(aws ecs describe-tasks \
+                    TASK_ARN=$(aws ecs list-tasks \
                         --cluster ${DEV_CLUSTER} \
                         --service-name ${DEV_SERVICE} \
                         --desired-status RUNNING \
+                        --region ${AWS_REGION} \
+                        --query 'taskArns[0]' \
+                        --output text)
+
+                    echo "DEV Task ARN: ${TASK_ARN}"
+
+                    if [ -z "${TASK_ARN}" ] || [ "${TASK_ARN}" = "None" ]; then
+                        echo "ERROR: Could not find running DEV task."
+                        exit 1
+                    fi
+
+                    echo "Finding DEV network interface..."
+
+                    ENI_ID=$(aws ecs describe-tasks \
+                        --cluster ${DEV_CLUSTER} \
+                        --tasks ${TASK_ARN} \
                         --region ${AWS_REGION} \
                         --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' \
                         --output text)
@@ -169,6 +212,8 @@ EOF
                         echo "ERROR: Could not find DEV network interface."
                         exit 1
                     fi
+
+                    echo "Finding DEV public IP..."
 
                     DEV_PUBLIC_IP=$(aws ec2 describe-network-interfaces \
                         --network-interface-ids ${ENI_ID} \
@@ -194,7 +239,7 @@ EOF
 
                     echo "${RESPONSE}" | grep -q "Project 7 - DEV to PRODUCTION Deployment"
 
-                    echo "DEV testing PASSED."
+                    echo "DEV application test PASSED."
                 '''
             }
         }
@@ -211,6 +256,8 @@ EOF
         stage('Promote Image to PROD ECR') {
             steps {
                 sh '''
+                    set -e
+
                     echo "Logging in to PROD ECR..."
 
                     aws ecr get-login-password \
@@ -233,7 +280,7 @@ EOF
 
                     docker push ${PROD_ECR}:${IMAGE_TAG}
 
-                    echo "PROD image promotion completed."
+                    echo "PROD image promotion completed successfully."
                 '''
             }
         }
@@ -241,9 +288,11 @@ EOF
         stage('Deploy to PRODUCTION') {
             steps {
                 sh '''
+                    set -e
+
                     echo "Preparing PRODUCTION ECS task definition..."
 
-                    cat > prod-task-definition-pipeline.json <<EOF
+                    cat > prod-task-definition-pipeline.json <<EOF_TASK
 {
   "family": "project7-prod-task",
   "networkMode": "awsvpc",
@@ -275,7 +324,7 @@ EOF
     }
   ]
 }
-EOF
+EOF_TASK
 
                     echo "Registering PRODUCTION task definition..."
 
@@ -283,7 +332,7 @@ EOF
                         --cli-input-json file://prod-task-definition-pipeline.json \
                         --region ${AWS_REGION}
 
-                    echo "Updating PRODUCTION service..."
+                    echo "Updating PRODUCTION ECS service..."
 
                     aws ecs update-service \
                         --cluster ${PROD_CLUSTER} \
@@ -299,7 +348,7 @@ EOF
                         --services ${PROD_SERVICE} \
                         --region ${AWS_REGION}
 
-                    echo "PRODUCTION deployment completed."
+                    echo "PRODUCTION deployment completed successfully."
                 '''
             }
         }
@@ -307,6 +356,8 @@ EOF
         stage('Verify PRODUCTION') {
             steps {
                 sh '''
+                    set -e
+
                     echo "Checking PRODUCTION service..."
 
                     aws ecs describe-services \
@@ -316,16 +367,24 @@ EOF
                         --query 'services[0].[status,desiredCount,runningCount,taskDefinition]' \
                         --output table
 
-                    echo "Checking running PRODUCTION task..."
+                    echo "Finding running PRODUCTION task..."
 
-                    aws ecs list-tasks \
+                    PROD_TASK_ARN=$(aws ecs list-tasks \
                         --cluster ${PROD_CLUSTER} \
                         --service-name ${PROD_SERVICE} \
                         --desired-status RUNNING \
                         --region ${AWS_REGION} \
-                        --output table
+                        --query 'taskArns[0]' \
+                        --output text)
 
-                    echo "PRODUCTION verification completed."
+                    echo "PRODUCTION Task ARN: ${PROD_TASK_ARN}"
+
+                    if [ -z "${PROD_TASK_ARN}" ] || [ "${PROD_TASK_ARN}" = "None" ]; then
+                        echo "ERROR: No running PRODUCTION task found."
+                        exit 1
+                    fi
+
+                    echo "PRODUCTION verification completed successfully."
                 '''
             }
         }
@@ -345,3 +404,4 @@ EOF
         }
     }
 }
+EOF
