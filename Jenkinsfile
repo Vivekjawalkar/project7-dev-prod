@@ -1,23 +1,24 @@
-cd ~/project7-dev-prod
+cdi ~/project7-dev-prod
 cat > Jenkinsfile <<'EOF'
 pipeline {
     agent any
 
     environment {
-        AWS_REGION = 'us-east-1'
-        AWS_ACCOUNT = '434504868934'
+    AWS_REGION = "us-east-1"
+    AWS_ACCOUNT = "434504868934"
 
-        DEV_CLUSTER = 'project7-dev-cluster'
-        DEV_SERVICE = 'project7-dev-service'
-        DEV_ECR = '434504868934.dkr.ecr.us-east-1.amazonaws.com/project7-dev-java-app'
+    DEV_CLUSTER = "project7-dev-cluster"
+    DEV_SERVICE = "project7-dev-service"
+    DEV_ECR = "434504868934.dkr.ecr.us-east-1.amazonaws.com/project7-dev-java-app"
 
-        PROD_CLUSTER = 'project7-prod-cluster'
-        PROD_SERVICE = 'project7-prod-service'
-        PROD_ECR = '434504868934.dkr.ecr.us-east-1.amazonaws.com/project7-prod-java-app'
+    PROD_CLUSTER = "project7-prod-cluster"
+    PROD_SERVICE = "project7-prod-service"
+    PROD_ECR = "434504868934.dkr.ecr.us-east-1.amazonaws.com/project7-prod-java-app"
 
-        EXECUTION_ROLE = 'arn:aws:iam::434504868934:role/ecsTaskExecutionRole'
+    EXECUTION_ROLE = "arn:aws:iam::434504868934:role/ecsTaskExecutionRole"
 
-        IMAGE_TAG = "${BUILD_NUMBER}"
+    IMAGE_TAG = "${BUILD_NUMBER}"
+}
     }
 
     stages {
