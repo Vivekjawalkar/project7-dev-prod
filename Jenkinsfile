@@ -1,10 +1,8 @@
 pipeline {
-
     agent any
 
     environment {
         AWS_REGION = 'us-east-1'
-
         AWS_ACCOUNT = '434504868934'
 
         DEV_CLUSTER = 'project7-dev-cluster'
@@ -31,7 +29,10 @@ pipeline {
         stage('Build') {
             steps {
                 dir('app') {
-                    sh 'mvn clean package -DskipTests'
+                    sh '''
+                        echo "Building Java application..."
+                        mvn clean package -DskipTests
+                    '''
                 }
             }
         }
@@ -39,7 +40,10 @@ pipeline {
         stage('Test') {
             steps {
                 dir('app') {
-                    sh 'mvn test'
+                    sh '''
+                        echo "Running application tests..."
+                        mvn test
+                    '''
                 }
             }
         }
@@ -47,106 +51,151 @@ pipeline {
         stage('Docker Build') {
             steps {
                 dir('app') {
-                    sh """
+                    sh '''
+                        echo "Building Docker image..."
+
                         docker build \
-                        -t ${DEV_ECR}:${IMAGE_TAG} \
-                        .
-                    """
+                            -t ${DEV_ECR}:${IMAGE_TAG} \
+                            .
+
+                        docker images | grep project7-dev-java-app
+                    '''
                 }
             }
         }
 
         stage('Push Image to DEV ECR') {
             steps {
-                sh """
-                    aws ecr get-login-password --region ${AWS_REGION} | \
-                    docker login --username AWS --password-stdin \
-                    ${AWS_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                sh '''
+                    echo "Logging in to DEV ECR..."
+
+                    aws ecr get-login-password \
+                        --region ${AWS_REGION} | \
+                    docker login \
+                        --username AWS \
+                        --password-stdin ${DEV_ECR}
+
+                    echo "Pushing image to DEV ECR..."
 
                     docker push ${DEV_ECR}:${IMAGE_TAG}
-                """
+
+                    echo "DEV image pushed successfully."
+                '''
             }
         }
 
         stage('Deploy to DEV') {
             steps {
-                sh """
+                sh '''
+                    echo "Preparing DEV ECS task definition..."
+
                     cat > dev-task-definition-pipeline.json <<EOF
-                    {
-                      "family": "project7-dev-task",
-                      "networkMode": "awsvpc",
-                      "requiresCompatibilities": ["FARGATE"],
-                      "cpu": "256",
-                      "memory": "512",
-                      "executionRoleArn": "${EXECUTION_ROLE}",
-                      "containerDefinitions": [
-                        {
-                          "name": "project7-dev-app",
-                          "image": "${DEV_ECR}:${IMAGE_TAG}",
-                          "essential": true,
-                          "portMappings": [
-                            {
-                              "containerPort": 8080,
-                              "protocol": "tcp"
-                            }
-                          ],
-                          "logConfiguration": {
-                            "logDriver": "awslogs",
-                            "options": {
-                              "awslogs-group": "/ecs/project7-dev-prod",
-                              "awslogs-region": "${AWS_REGION}",
-                              "awslogs-stream-prefix": "dev"
-                            }
-                          }
-                        }
-                      ]
-                    }
-                    EOF
+{
+  "family": "project7-dev-task",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "${EXECUTION_ROLE}",
+  "containerDefinitions": [
+    {
+      "name": "project7-dev-app",
+      "image": "${DEV_ECR}:${IMAGE_TAG}",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/project7-dev-prod",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "dev"
+        }
+      }
+    }
+  ]
+}
+EOF
+
+                    echo "Registering DEV task definition..."
 
                     aws ecs register-task-definition \
-                    --cli-input-json file://dev-task-definition-pipeline.json \
-                    --region ${AWS_REGION}
+                        --cli-input-json file://dev-task-definition-pipeline.json \
+                        --region ${AWS_REGION}
+
+                    echo "Updating DEV service..."
 
                     aws ecs update-service \
-                    --cluster ${DEV_CLUSTER} \
-                    --service ${DEV_SERVICE} \
-                    --task-definition project7-dev-task \
-                    --region ${AWS_REGION}
+                        --cluster ${DEV_CLUSTER} \
+                        --service ${DEV_SERVICE} \
+                        --task-definition project7-dev-task \
+                        --force-new-deployment \
+                        --region ${AWS_REGION}
+
+                    echo "Waiting for DEV service to stabilize..."
 
                     aws ecs wait services-stable \
-                    --cluster ${DEV_CLUSTER} \
-                    --services ${DEV_SERVICE} \
-                    --region ${AWS_REGION}
-                """
+                        --cluster ${DEV_CLUSTER} \
+                        --services ${DEV_SERVICE} \
+                        --region ${AWS_REGION}
+
+                    echo "DEV deployment completed."
+                '''
             }
         }
 
         stage('Test DEV') {
             steps {
-                sh """
-                    ENI_ID=\$(aws ecs describe-tasks \
-                      --cluster ${DEV_CLUSTER} \
-                      --service-name ${DEV_SERVICE} \
-                      --desired-status RUNNING \
-                      --region ${AWS_REGION} \
-                      --query 'tasks[0].attachments[0].details[?name==\\`networkInterfaceId\\`].value' \
-                      --output text)
+                sh '''
+                    echo "Finding running DEV task..."
 
-                    DEV_PUBLIC_IP=\$(aws ec2 describe-network-interfaces \
-                      --network-interface-ids \$ENI_ID \
-                      --region ${AWS_REGION} \
-                      --query 'NetworkInterfaces[0].Association.PublicIp' \
-                      --output text)
+                    ENI_ID=$(aws ecs describe-tasks \
+                        --cluster ${DEV_CLUSTER} \
+                        --service-name ${DEV_SERVICE} \
+                        --desired-status RUNNING \
+                        --region ${AWS_REGION} \
+                        --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' \
+                        --output text)
 
-                    echo "DEV Public IP: \$DEV_PUBLIC_IP"
+                    echo "DEV ENI: ${ENI_ID}"
 
-                    RESPONSE=\$(curl -s --max-time 30 http://\$DEV_PUBLIC_IP:8080)
+                    if [ -z "${ENI_ID}" ] || [ "${ENI_ID}" = "None" ]; then
+                        echo "ERROR: Could not find DEV network interface."
+                        exit 1
+                    fi
+
+                    DEV_PUBLIC_IP=$(aws ec2 describe-network-interfaces \
+                        --network-interface-ids ${ENI_ID} \
+                        --region ${AWS_REGION} \
+                        --query 'NetworkInterfaces[0].Association.PublicIp' \
+                        --output text)
+
+                    echo "DEV Public IP: ${DEV_PUBLIC_IP}"
+
+                    if [ -z "${DEV_PUBLIC_IP}" ] || [ "${DEV_PUBLIC_IP}" = "None" ]; then
+                        echo "ERROR: DEV task does not have a public IP."
+                        exit 1
+                    fi
+
+                    echo "Testing DEV application..."
+
+                    RESPONSE=$(curl -s \
+                        --max-time 30 \
+                        http://${DEV_PUBLIC_IP}:8080)
 
                     echo "DEV Response:"
-                    echo "\$RESPONSE"
+                    echo "${RESPONSE}"
 
-                    echo "\$RESPONSE" | grep -q "Project 7 - DEV to PRODUCTION Deployment"
-                """
+                    echo "${RESPONSE}" | grep -q "Project 7 - DEV to PRODUCTION Deployment"
+
+                    echo "DEV testing PASSED."
+                '''
             }
         }
 
@@ -161,81 +210,123 @@ pipeline {
 
         stage('Promote Image to PROD ECR') {
             steps {
-                sh """
+                sh '''
+                    echo "Logging in to PROD ECR..."
+
+                    aws ecr get-login-password \
+                        --region ${AWS_REGION} | \
+                    docker login \
+                        --username AWS \
+                        --password-stdin ${PROD_ECR}
+
+                    echo "Pulling approved DEV image..."
+
                     docker pull ${DEV_ECR}:${IMAGE_TAG}
 
+                    echo "Tagging approved image for PROD..."
+
                     docker tag \
-                    ${DEV_ECR}:${IMAGE_TAG} \
-                    ${PROD_ECR}:${IMAGE_TAG}
+                        ${DEV_ECR}:${IMAGE_TAG} \
+                        ${PROD_ECR}:${IMAGE_TAG}
+
+                    echo "Pushing approved image to PROD ECR..."
 
                     docker push ${PROD_ECR}:${IMAGE_TAG}
-                """
+
+                    echo "PROD image promotion completed."
+                '''
             }
         }
 
         stage('Deploy to PRODUCTION') {
             steps {
-                sh """
+                sh '''
+                    echo "Preparing PRODUCTION ECS task definition..."
+
                     cat > prod-task-definition-pipeline.json <<EOF
-                    {
-                      "family": "project7-prod-task",
-                      "networkMode": "awsvpc",
-                      "requiresCompatibilities": ["FARGATE"],
-                      "cpu": "256",
-                      "memory": "512",
-                      "executionRoleArn": "${EXECUTION_ROLE}",
-                      "containerDefinitions": [
-                        {
-                          "name": "project7-prod-app",
-                          "image": "${PROD_ECR}:${IMAGE_TAG}",
-                          "essential": true,
-                          "portMappings": [
-                            {
-                              "containerPort": 8080,
-                              "protocol": "tcp"
-                            }
-                          ],
-                          "logConfiguration": {
-                            "logDriver": "awslogs",
-                            "options": {
-                              "awslogs-group": "/ecs/project7-dev-prod",
-                              "awslogs-region": "${AWS_REGION}",
-                              "awslogs-stream-prefix": "prod"
-                            }
-                          }
-                        }
-                      ]
-                    }
-                    EOF
+{
+  "family": "project7-prod-task",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "${EXECUTION_ROLE}",
+  "containerDefinitions": [
+    {
+      "name": "project7-prod-app",
+      "image": "${PROD_ECR}:${IMAGE_TAG}",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/project7-dev-prod",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "prod"
+        }
+      }
+    }
+  ]
+}
+EOF
+
+                    echo "Registering PRODUCTION task definition..."
 
                     aws ecs register-task-definition \
-                    --cli-input-json file://prod-task-definition-pipeline.json \
-                    --region ${AWS_REGION}
+                        --cli-input-json file://prod-task-definition-pipeline.json \
+                        --region ${AWS_REGION}
+
+                    echo "Updating PRODUCTION service..."
 
                     aws ecs update-service \
-                    --cluster ${PROD_CLUSTER} \
-                    --service ${PROD_SERVICE} \
-                    --task-definition project7-prod-task \
-                    --region ${AWS_REGION}
+                        --cluster ${PROD_CLUSTER} \
+                        --service ${PROD_SERVICE} \
+                        --task-definition project7-prod-task \
+                        --force-new-deployment \
+                        --region ${AWS_REGION}
+
+                    echo "Waiting for PRODUCTION service to stabilize..."
 
                     aws ecs wait services-stable \
-                    --cluster ${PROD_CLUSTER} \
-                    --services ${PROD_SERVICE} \
-                    --region ${AWS_REGION}
-                """
+                        --cluster ${PROD_CLUSTER} \
+                        --services ${PROD_SERVICE} \
+                        --region ${AWS_REGION}
+
+                    echo "PRODUCTION deployment completed."
+                '''
             }
         }
 
         stage('Verify PRODUCTION') {
             steps {
-                sh """
+                sh '''
+                    echo "Checking PRODUCTION service..."
+
                     aws ecs describe-services \
-                    --cluster ${PROD_CLUSTER} \
-                    --services ${PROD_SERVICE} \
-                    --region ${AWS_REGION} \
-                    --query 'services[0].[status,desiredCount,runningCount,taskDefinition]' \
-                    --output table
-                """
+                        --cluster ${PROD_CLUSTER} \
+                        --services ${PROD_SERVICE} \
+                        --region ${AWS_REGION} \
+                        --query 'services[0].[status,desiredCount,runningCount,taskDefinition]' \
+                        --output table
+
+                    echo "Checking running PRODUCTION task..."
+
+                    aws ecs list-tasks \
+                        --cluster ${PROD_CLUSTER} \
+                        --service-name ${PROD_SERVICE} \
+                        --desired-status RUNNING \
+                        --region ${AWS_REGION} \
+                        --output table
+
+                    echo "PRODUCTION verification completed."
+                '''
             }
         }
     }
@@ -246,7 +337,11 @@ pipeline {
         }
 
         failure {
-            echo 'Project 7 deployment pipeline failed.'
+            echo 'Project 7 pipeline failed. Check the console output for details.'
+        }
+
+        always {
+            echo 'Project 7 pipeline execution finished.'
         }
     }
 }
